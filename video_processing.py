@@ -1,12 +1,15 @@
 import cv2
 import mediapipe as mp
 import os
-from flask import Response
+from flask import Response, jsonify
 
 # Initialize MediaPipe Pose
 mp_pose = mp.solutions.pose
 pose = mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5)
 mp_drawing = mp.solutions.drawing_utils
+
+# Initialize a global variable to store the current video capture object
+cap = None
 
 # Function to load shirt images
 def load_shirt_images():
@@ -45,65 +48,86 @@ def overlay_image(background, overlay, position):
 
     return background
 
-
-# Video streaming function with shirt overlay
 def stream_video_feed(shirt_index):
+    global cap  # Declare 'cap' as global
+
     def generate_video_feed():
+        global cap  # Access the global 'cap'
+
+        # If the camera was previously opened, close it before reopening
+        if cap is not None and cap.isOpened():
+            print("Releasing the camera...")
+            cap.release()
+
+        # Open the camera again
+        print("Opening the camera...")
         cap = cv2.VideoCapture(0)
 
+        # Check if the camera is opened
         if not cap.isOpened():
+            print("Error: Could not open video source.")
             raise RuntimeError("Could not open video source.")
+        
+        print("Camera opened successfully.")
 
+        # Ensure shirt images are available
         shirt_images = load_shirt_images()
+        if not shirt_images:
+            print("Error: No shirt images loaded!")
+            raise RuntimeError("No shirt images loaded!")
 
         while True:
             ret, frame = cap.read()
+
+            # If reading the frame fails, handle the error
             if not ret:
+                print("Error: Failed to read frame from the camera.")
                 break
 
-            # Convert the BGR image to RGB for MediaPipe processing
-            image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = pose.process(image_rgb)
+            try:
+                # Convert the BGR image to RGB for MediaPipe processing
+                image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                results = pose.process(image_rgb)
 
-            # Draw pose landmarks and overlay shirt if landmarks are detected
-            if results.pose_landmarks:
-                #mp_drawing.draw_landmarks(frame, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
+                # Draw pose landmarks and overlay shirt if landmarks are detected
+                if results.pose_landmarks:
+                    landmarks = results.pose_landmarks.landmark
+                    height, width, _ = frame.shape
+                    x11, y11 = int(landmarks[11].x * width), int(landmarks[11].y * height)
+                    x12, y12 = int(landmarks[12].x * width), int(landmarks[12].y * height)
 
-                # Get pose landmarks
-                landmarks = results.pose_landmarks.landmark
-                height, width, _ = frame.shape
-                x11, y11 = int(landmarks[11].x * width), int(landmarks[11].y * height)
-                x12, y12 = int(landmarks[12].x * width), int(landmarks[12].y * height)
+                    shoulder_x = int((x11 + x12) / 2)
+                    shoulder_y = int((y11 + y12) / 2)
+                    shoulder_width = abs(x11 - x12)
 
-                # Calculate shirt position and dimensions
-                shoulder_x = int((x11 + x12) / 2)  # Midpoint for x-position
-                shoulder_y = int((y11 + y12) / 2)  # Midpoint for y-position
-                shoulder_width = abs(x11 - x12)  # Distance between shoulders
+                    shirt_width = int(shoulder_width * 1.5)
+                    shirt_height = int(shirt_width * (581 / 440))
 
-                shirt_width = int(shoulder_width * 1.5)  # Adjust factor for suitable width
-                shirt_height = int(shirt_width * (581 / 440))  # Maintain aspect ratio
-
-                if shirt_width > 0 and shirt_images:
-                    shirt_image = shirt_images[shirt_index]
-
-                    if shirt_image is not None and shirt_image.shape[2] == 4:  # Ensure image has an alpha channel
-                        # Resize and calculate position
+                    if shirt_width > 0:
+                        shirt_image = shirt_images[shirt_index]
                         shirt_image = cv2.resize(shirt_image, (shirt_width, shirt_height))
                         shirt_x = shoulder_x - int(shirt_width / 2)
-                        shirt_y = shoulder_y - int(shirt_height * 0.3)  # Move up slightly for better fit
+                        shirt_y = shoulder_y - int(shirt_height * 0.3)
 
                         # Overlay the shirt image
                         frame = overlay_image(frame, shirt_image, (shirt_x, shirt_y))
+            except Exception as e:
+                print(f"Error during frame processing: {e}")
+                break
 
-            # Convert frame to JPEG for streaming
-            _, jpeg = cv2.imencode('.jpg', frame)
-            if not _:
-                raise RuntimeError("Failed to encode frame.")
+            try:
+                # Convert frame to JPEG for streaming
+                _, jpeg = cv2.imencode('.jpg', frame)
+                if not _:
+                    print("Error: Failed to encode frame.")
+                    break
 
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
 
-        cap.release()
+            except Exception as e:
+                print(f"Error during JPEG encoding: {e}")
+                break
 
-    return Response(generate_video_feed(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
+
+    return generate_video_feed()
